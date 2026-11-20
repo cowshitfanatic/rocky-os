@@ -12,6 +12,7 @@ mod gdt;
 mod interrupts;
 mod memory;
 mod mouse;
+mod netserial;
 mod scheduler;
 mod shell;
 mod usermode;

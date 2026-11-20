@@ -179,7 +179,7 @@ check(count_color(px, w, h, (16, 110, 120), 0, 705, 400, 712, tol=15) > 2000, "w
 # Glass top bar (dark, not the old 30,42,56).
 check(count_color(px, w, h, (14, 16, 28), 0, 0, 1280, 32, tol=8) > 20000, "top bar present")
 # Floating dock pill.
-check(count_color(px, w, h, (18, 20, 36), 436, 644, 844, 708, tol=8) > 8000, "dock present")
+check(count_color(px, w, h, (18, 20, 36), 404, 644, 876, 708, tol=8) > 8000, "dock present")
 # Gradient title bars: Terminal active (blue-violet), Files inactive (grey).
 check(count_color(px, w, h, (99, 93, 226), 300, 54, 500, 64, tol=25) > 1500, "Terminal title bar (active gradient)")
 check(count_color(px, w, h, (85, 92, 112), 900, 54, 1100, 64, tol=20) > 1500, "Files title bar (inactive gradient)")
@@ -216,7 +216,7 @@ check(count_color(px2, w, h, (124, 80, 220), 16, 300, 316, 304, tol=12) < 50, "S
 
 # Open Notes from the dock (icon centre 672,672). A screendump can
 # catch a render mid-frame, so retry with fresh dumps.
-click(506, 310)
+click(464, 310)
 notes_open = False
 for attempt in range(3):
     mon_cmd(f"screendump {PPM2}")
@@ -243,7 +243,7 @@ check(typed, "typed text appears in Notes")
 
 # Drag the Terminal window by its title bar: press at (200,62),
 # move +100,0, release. Title bar should now start near x=140.
-mon_cmd("mouse_move -472 -610")  # (672,672) -> (200,62)
+mon_cmd("mouse_move -430 -610")  # (630,672) -> (200,62)
 time.sleep(0.5)
 mon_cmd("mouse_button 1")
 time.sleep(0.5)
@@ -271,7 +271,7 @@ check(cursor_after_drag, "cursor at drag end position")
 
 # Open Settings from the dock (icon centre ~800,672), then click
 # the Sunset swatch (centre 625,350).
-click(500, 610)
+click(458, 610)
 click(-175, -322)
 time.sleep(1)
 mon_cmd(f"screendump {PPM2}")

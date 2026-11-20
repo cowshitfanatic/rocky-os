@@ -41,7 +41,7 @@ EXPECTED = [
     "Welcome to Rocky OS!",
     "Hello from the Rocky OS filesystem!",
     "Hello, Trevor! Rocky OS is alive.",
-    "10 memory regions reported, heap is 100 KiB",
+    "10 memory regions reported, heap is 512 KiB",
     "timer ticks since boot:",
     "scheduler: preemptive round-robin, quantum 3 ticks",
     "counter Finished steps 5",

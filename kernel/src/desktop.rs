@@ -12,11 +12,14 @@
 //! * Desktop icons on the left and a live clock widget.
 //! * Windows with drop shadows, rounded corners, gradient title
 //!   bars, traffic-light close/minimise/maximise buttons.
-//! * Six apps: Terminal (runs the shell commands, output captured
+//! * Seven apps: Terminal (runs the shell commands, output captured
 //!   into a scrollback), Files (RockyFS list + file viewer),
 //!   Calculator (clickable buttons), Notes (editable, saves to
 //!   RockyFS as notes.txt), System Monitor (uptime, tasks, live
-//!   activity bar), Settings (specs + 3 wallpaper themes).
+//!   activity bar), Settings (specs + 3 wallpaper themes), Web
+//!   Browser (scratch-built text browser; pages arrive over the
+//!   COM2 serial link from the host-side net proxy, which fetches
+//!   the real page over HTTPS — Rocky OS has no Ethernet/TCP/IP).
 //! * PS/2 mouse: cursor, click, drag. Keyboard/serial input
 //!   goes to the focused Terminal or Notes window.
 //!
@@ -38,13 +41,13 @@ const TITLE_H: i32 = 28;
 const TITLE_R: i32 = 10;
 const CHAR_W: i32 = 8;
 const CHAR_H: i32 = 16;
-const DOCK_W: i32 = 408;
+const DOCK_W: i32 = 472;
 const DOCK_H: i32 = 64;
 const DOCK_Y: i32 = 644;
 const MENU_X: i32 = 16;
 const MENU_Y: i32 = 300;
 const MENU_W: i32 = 300;
-const MENU_H: i32 = 336;
+const MENU_H: i32 = 380;
 const MENU_ROWS_Y: i32 = 340;
 const MENU_ROW_H: i32 = 44;
 const WIDGET_X: i32 = 120;
@@ -135,16 +138,34 @@ enum App {
     Notes,
     Monitor,
     Settings,
+    Browser,
 }
 
-const APPS: [App; 6] = [
+const APPS: [App; 7] = [
     App::Terminal,
     App::Files,
     App::Calculator,
     App::Notes,
     App::Monitor,
     App::Settings,
+    App::Browser,
 ];
+
+/// Browser fetch stages. The fetch is polled a little each desktop
+/// loop iteration (`poll_browser`) so the desktop stays responsive
+/// while the proxy fetches over HTTPS and the text streams in at
+/// 115200 baud (~1-2 s for a full article).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FetchState {
+    Idle,
+    WaitHeader,
+    WaitBody,
+    WaitEnd,
+}
+
+/// One parsed article block: (kind, text). kind 0 = title,
+/// 1 = heading, 2 = paragraph.
+type Block = (u8, String);
 
 impl App {
     fn title(self) -> &'static str {
@@ -155,6 +176,7 @@ impl App {
             App::Notes => "Notes",
             App::Monitor => "System Monitor",
             App::Settings => "Settings",
+            App::Browser => "Web Browser",
         }
     }
     /// Short label for desktop icons.
@@ -166,6 +188,7 @@ impl App {
             App::Notes => "Notes",
             App::Monitor => "Monitor",
             App::Settings => "Settings",
+            App::Browser => "Browser",
         }
     }
     fn glyph(self) -> &'static str {
@@ -176,6 +199,7 @@ impl App {
             App::Notes => "N",
             App::Monitor => "M",
             App::Settings => "S",
+            App::Browser => "W",
         }
     }
     fn color(self) -> Color {
@@ -186,6 +210,7 @@ impl App {
             App::Notes => (220, 180, 40),
             App::Monitor => (20, 160, 140),
             App::Settings => (120, 110, 150),
+            App::Browser => (40, 140, 230),
         }
     }
     fn subtitle(self) -> &'static str {
@@ -196,6 +221,7 @@ impl App {
             App::Notes => "write & save",
             App::Monitor => "tasks & uptime",
             App::Settings => "themes & about",
+            App::Browser => "web via serial proxy",
         }
     }
 }
@@ -291,6 +317,17 @@ struct Desktop {
     notes_loaded: bool,
     notes_saved: Option<u64>,
     notes_save_err: bool,
+    browser_url: String,
+    browser_blocks: Vec<Block>,
+    browser_lines: Vec<Block>,
+    browser_scroll: usize,
+    browser_status: String,
+    browser_state: FetchState,
+    browser_header: String,
+    browser_body: Vec<u8>,
+    browser_body_len: usize,
+    browser_fetch_start: u64,
+    browser_loaded: bool,
     exit: bool,
 }
 
@@ -335,6 +372,17 @@ impl Desktop {
             notes_loaded: false,
             notes_saved: None,
             notes_save_err: false,
+            browser_url: "https://en.wikipedia.org/wiki/Chimpanzee".into(),
+            browser_blocks: Vec::new(),
+            browser_lines: Vec::new(),
+            browser_scroll: 0,
+            browser_status: "Not loaded yet.".into(),
+            browser_state: FetchState::Idle,
+            browser_header: String::new(),
+            browser_body: Vec::new(),
+            browser_body_len: 0,
+            browser_fetch_start: 0,
+            browser_loaded: false,
             exit: false,
         };
         push_line(&mut d.term_lines, "Rocky OS Desktop - Aurora".into());
@@ -380,10 +428,16 @@ impl Desktop {
             App::Notes => (140, 80, 560, 440, "Notes"),
             App::Monitor => (700, 90, 540, 420, "System Monitor"),
             App::Settings => (360, 140, 560, 380, "Settings"),
+            App::Browser => (120, 60, 780, 540, "Web Browser"),
         };
         if app == App::Files {
             self.files_cache = crate::fs::list();
             self.files_cache_tick = TIMER_TICKS.load(Ordering::SeqCst);
+        }
+        if app == App::Browser && !self.browser_loaded {
+            self.browser_loaded = true;
+            let url = self.browser_url.clone();
+            self.browser_start_fetch(&url);
         }
         if app == App::Notes && !self.notes_loaded {
             self.notes_loaded = true;
@@ -459,7 +513,7 @@ impl Desktop {
             return None;
         }
         let dx = dock_x();
-        if x < dx + 12 || x >= dx + 12 + 6 * 64 {
+        if x < dx + 12 || x >= dx + 12 + 7 * 64 {
             return None;
         }
         Some(APPS[((x - dx - 12) / 64) as usize])
@@ -473,7 +527,7 @@ impl Desktop {
             return None;
         }
         let i = (y - 64) / 88;
-        if i < 0 || i >= 6 {
+        if i < 0 || i >= 7 {
             return None;
         }
         Some(APPS[i as usize])
@@ -483,7 +537,7 @@ impl Desktop {
         if x < MENU_X || x >= MENU_X + MENU_W {
             return None;
         }
-        if y < MENU_ROWS_Y || y >= MENU_ROWS_Y + 6 * MENU_ROW_H {
+        if y < MENU_ROWS_Y || y >= MENU_ROWS_Y + 7 * MENU_ROW_H {
             return None;
         }
         Some(APPS[((y - MENU_ROWS_Y) / MENU_ROW_H) as usize])
@@ -491,8 +545,42 @@ impl Desktop {
 
     // ----- input -----
 
+    /// Navigation keys (arrows / PgUp / PgDn scroll the browser).
+    fn feed_key(&mut self, k: crate::shell::KeyInput) {
+        use crate::shell::KeyInput::*;
+        match k {
+            Char(c) => self.feed_char(c),
+            Up => self.browser_scroll_by(-1),
+            Down => self.browser_scroll_by(1),
+            PageUp => {
+                let n = self.browser_visible_lines().saturating_sub(1).max(1) as i32;
+                self.browser_scroll_by(-n);
+            }
+            PageDown => {
+                let n = self.browser_visible_lines().saturating_sub(1).max(1) as i32;
+                self.browser_scroll_by(n);
+            }
+        }
+    }
+
     fn feed_char(&mut self, c: char) {
         match self.focused {
+            Some(App::Browser) => match c {
+                '\u{1b}' => self.exit = true,
+                '\n' | '\r' => {
+                    let url = self.browser_url.clone();
+                    self.browser_start_fetch(&url);
+                }
+                '\u{8}' | '\u{7f}' => {
+                    self.browser_url.pop();
+                }
+                c if !c.is_control() => {
+                    if self.browser_url.len() < 120 {
+                        self.browser_url.push(c);
+                    }
+                }
+                _ => {}
+            },
             Some(App::Notes) => match c {
                 '\u{1b}' => self.exit = true,
                 '\n' | '\r' => {
@@ -627,7 +715,12 @@ impl Desktop {
                             self.focused = None;
                         }
                     }
-                    TitleBtn::Max => self.toggle_max(app),
+                    TitleBtn::Max => {
+                        self.toggle_max(app);
+                        if app == App::Browser {
+                            self.browser_rewrap();
+                        }
+                    }
                 }
                 return;
             }
@@ -642,6 +735,7 @@ impl Desktop {
                 App::Calculator => self.calc_click(x, y),
                 App::Notes => self.notes_click(x, y),
                 App::Settings => self.settings_click(x, y),
+                App::Browser => self.browser_click(x, y),
                 _ => {}
             }
             return;
@@ -734,6 +828,255 @@ impl Desktop {
                 self.theme = i as usize;
                 return;
             }
+        }
+    }
+
+    // ----- browser -----
+
+    /// Start fetching `url` over COM2 via the host proxy.
+    fn browser_start_fetch(&mut self, url: &str) {
+        self.browser_url = url.to_string();
+        self.browser_status = "Fetching...".into();
+        self.browser_blocks.clear();
+        self.browser_lines.clear();
+        self.browser_scroll = 0;
+        self.browser_header.clear();
+        self.browser_body.clear();
+        self.browser_body_len = 0;
+        self.browser_state = FetchState::WaitHeader;
+        self.browser_fetch_start = TIMER_TICKS.load(Ordering::SeqCst);
+        crate::netserial::write_str(&format!("GET {}\n", url));
+        crate::serial_print(format_args!("browser: requesting {}\n", url));
+    }
+
+    fn browser_visible_lines(&self) -> usize {
+        match self.window(App::Browser) {
+            Some(win) => ((win.h - TITLE_H - 72) / CHAR_H).max(1) as usize,
+            None => 1,
+        }
+    }
+
+    fn browser_max_scroll(&self) -> usize {
+        self.browser_lines
+            .len()
+            .saturating_sub(self.browser_visible_lines())
+    }
+
+    fn browser_scroll_by(&mut self, delta: i32) {
+        if self.focused != Some(App::Browser) {
+            return;
+        }
+        let max = self.browser_max_scroll() as i32;
+        let cur = self.browser_scroll as i32;
+        self.browser_scroll = (cur + delta).clamp(0, max) as usize;
+    }
+
+    /// Poll COM2 a little each loop iteration. Returns true if the
+    /// browser state changed (caller re-renders). Never blocks:
+    /// `read_byte` is a poll, and the timeouts are tick budgets.
+    fn poll_browser(&mut self) -> bool {
+        use FetchState::*;
+        let now = TIMER_TICKS.load(Ordering::SeqCst);
+        match self.browser_state {
+            Idle => false,
+            WaitHeader => {
+                while let Some(b) = crate::netserial::read_byte() {
+                    if b == b'\n' {
+                        let header = core::mem::take(&mut self.browser_header);
+                        if let Some(rest) = header.strip_prefix("OK ") {
+                            match rest.trim().parse::<usize>() {
+                                Ok(len) if len <= 200_000 => {
+                                    self.browser_body_len = len;
+                                    self.browser_body.clear();
+                                    self.browser_state = WaitBody;
+                                    return true;
+                                }
+                                _ => {
+                                    self.browser_status =
+                                        "Error: bad length from proxy".into();
+                                    self.browser_state = Idle;
+                                    return true;
+                                }
+                            }
+                        } else if let Some(rest) = header.strip_prefix("ERR ") {
+                            self.browser_status = format!("Error: {}", rest);
+                            self.browser_state = Idle;
+                            crate::serial_print(format_args!(
+                                "browser: error {}\n", rest
+                            ));
+                            return true;
+                        } else if !header.is_empty() {
+                            self.browser_status =
+                                format!("Error: bad reply: {}", header);
+                            self.browser_state = Idle;
+                            return true;
+                        }
+                    } else if b != b'\r' {
+                        if self.browser_header.len() < 512 {
+                            self.browser_header.push(b as char);
+                        }
+                    }
+                }
+                if now.wrapping_sub(self.browser_fetch_start) >= 180 {
+                    self.browser_status =
+                        "Fetch timed out - is net-proxy running?".into();
+                    self.browser_state = Idle;
+                    crate::serial_print(format_args!("browser: timeout\n"));
+                    true
+                } else {
+                    false
+                }
+            }
+            WaitBody => {
+                while let Some(b) = crate::netserial::read_byte() {
+                    self.browser_body.push(b);
+                    if self.browser_body.len() >= self.browser_body_len {
+                        break;
+                    }
+                }
+                if self.browser_body.len() >= self.browser_body_len {
+                    let text =
+                        String::from_utf8_lossy(&self.browser_body).into_owned();
+                    let n = self.browser_body.len();
+                    self.browser_parse(&text);
+                    self.browser_state = WaitEnd;
+                    self.browser_header.clear();
+                    self.browser_fetch_start = now;
+                    let url = self.browser_url.clone();
+                    let shown = url.strip_prefix("https://").unwrap_or(&url);
+                    self.browser_status =
+                        format!("Loaded {} bytes - {}", n, shown);
+                    crate::serial_print(format_args!(
+                        "browser: fetched {} bytes\n", n
+                    ));
+                    true
+                } else if now.wrapping_sub(self.browser_fetch_start) >= 360 {
+                    self.browser_status = "Fetch timed out (body)".into();
+                    self.browser_state = Idle;
+                    crate::serial_print(format_args!("browser: timeout\n"));
+                    true
+                } else {
+                    false
+                }
+            }
+            WaitEnd => {
+                // Drain the trailing "\nEND\n" so it cannot pollute
+                // the next fetch's header.
+                while let Some(b) = crate::netserial::read_byte() {
+                    if b == b'\n' {
+                        if self.browser_header.trim() == "END" {
+                            self.browser_header.clear();
+                            self.browser_state = Idle;
+                            return true;
+                        }
+                        self.browser_header.clear();
+                    } else if b != b'\r' {
+                        if self.browser_header.len() < 16 {
+                            self.browser_header.push(b as char);
+                        }
+                    }
+                }
+                if now.wrapping_sub(self.browser_fetch_start) >= 36 {
+                    self.browser_header.clear();
+                    self.browser_state = Idle;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Split proxy payload lines ("TITLE:..", "H1:..", "P:..",
+    /// "LI:..") into blocks, then word-wrap them to the window.
+    fn browser_parse(&mut self, text: &str) {
+        self.browser_blocks.clear();
+        for raw in text.lines() {
+            let (kind, body) = if let Some(t) = raw.strip_prefix("TITLE:") {
+                (0u8, t)
+            } else if raw.starts_with("H1:")
+                || raw.starts_with("H2:")
+                || raw.starts_with("H3:")
+            {
+                (1u8, &raw[3..])
+            } else if let Some(t) = raw.strip_prefix("P:") {
+                (2u8, t)
+            } else if let Some(t) = raw.strip_prefix("LI:") {
+                (2u8, t)
+            } else {
+                (2u8, raw)
+            };
+            let body = body.trim();
+            if !body.is_empty() {
+                let text = if raw.starts_with("LI:") {
+                    format!("- {}", body)
+                } else {
+                    body.to_string()
+                };
+                self.browser_blocks.push((kind, text));
+            }
+        }
+        self.browser_rewrap();
+    }
+
+    fn browser_rewrap(&mut self) {
+        self.browser_lines.clear();
+        let max_chars = match self.window(App::Browser) {
+            Some(win) => ((win.w - 44) / CHAR_W).max(10) as usize,
+            None => 80,
+        };
+        for (kind, text) in self.browser_blocks.clone() {
+            let mut cur = String::new();
+            for word in text.split_whitespace() {
+                if cur.is_empty() {
+                    cur.push_str(word);
+                    continue;
+                }
+                if cur.chars().count() + 1 + word.chars().count() > max_chars {
+                    self.browser_lines.push((kind, core::mem::take(&mut cur)));
+                    cur.push_str(word);
+                } else {
+                    cur.push(' ');
+                    cur.push_str(word);
+                }
+            }
+            // A single over-long word (or a short block): char-wrap.
+            while cur.chars().count() > max_chars {
+                let head: String = cur.chars().take(max_chars).collect();
+                let tail: String = cur.chars().skip(max_chars).collect();
+                self.browser_lines.push((kind, head));
+                cur = tail;
+            }
+            self.browser_lines.push((kind, cur));
+        }
+        if self.browser_scroll > self.browser_max_scroll() {
+            self.browser_scroll = self.browser_max_scroll();
+        }
+    }
+
+    fn browser_click(&mut self, x: i32, y: i32) {
+        let Some(win) = self.window(App::Browser).copied() else { return };
+        let bar_y = win.content_y() + 8;
+        // Go button.
+        if x >= win.x + win.w - 64 && x < win.x + win.w - 8
+            && y >= bar_y && y < bar_y + 28
+        {
+            let url = self.browser_url.clone();
+            self.browser_start_fetch(&url);
+            return;
+        }
+        // Scrollbar track (right edge of the content area).
+        let top = win.content_y() + 64;
+        let bot = win.y + win.h - 8;
+        if x >= win.x + win.w - 18 && x < win.x + win.w - 2
+            && y >= top && y < bot && bot > top
+        {
+            let max = self.browser_max_scroll();
+            if max > 0 {
+                let frac = (y - top) as usize * max / (bot - top) as usize;
+                self.browser_scroll = frac.min(max);
+            }
+            return;
         }
     }
 
@@ -1030,7 +1373,7 @@ impl Desktop {
         framebuffer::draw_text(
             (WIDGET_X + 16) as usize,
             (WIDGET_Y + 92) as usize,
-            &format!("{} regions - heap 100 KiB", self.memory_regions),
+            &format!("{} regions - heap 512 KiB", self.memory_regions),
             MUTED,
             None,
         );
@@ -1068,6 +1411,7 @@ impl Desktop {
             App::Notes => self.render_notes(win),
             App::Monitor => self.render_monitor(win),
             App::Settings => self.render_settings(win),
+            App::Browser => self.render_browser(win),
         }
     }
 
@@ -1309,7 +1653,7 @@ impl Desktop {
         framebuffer::draw_text(
             tx,
             y as usize,
-            &format!("Memory: {} regions  -  heap 100 KiB", self.memory_regions),
+            &format!("Memory: {} regions  -  heap 512 KiB", self.memory_regions),
             TERM_TEXT,
             None,
         );
@@ -1355,6 +1699,135 @@ impl Desktop {
         );
     }
 
+    fn render_browser(&self, win: &Window) {
+        let cy0 = win.content_y();
+        let bar_y = cy0 + 8;
+        // URL bar.
+        framebuffer::fill_rounded_rect(
+            (win.x + 8) as usize,
+            bar_y as usize,
+            (win.w - 80) as usize,
+            28,
+            6,
+            TERM_BG,
+        );
+        framebuffer::draw_rect(
+            (win.x + 8) as usize,
+            bar_y as usize,
+            (win.w - 80) as usize,
+            28,
+            (70, 76, 100),
+        );
+        let max_url = ((win.w - 100) / CHAR_W).max(1) as usize;
+        let shown: String = self.browser_url.chars().take(max_url).collect();
+        framebuffer::draw_text(
+            (win.x + 14) as usize,
+            (bar_y + 6) as usize,
+            &shown,
+            (240, 244, 255),
+            None,
+        );
+        if self.focused == Some(App::Browser) {
+            let cx = win.x + 14 + shown.chars().count() as i32 * CHAR_W;
+            framebuffer::fill_rect(cx as usize, (bar_y + 6) as usize, 8, 16, TERM_GREEN);
+        }
+        // Go button.
+        framebuffer::fill_rounded_rect(
+            (win.x + win.w - 64) as usize,
+            bar_y as usize,
+            56,
+            28,
+            6,
+            (40, 140, 90),
+        );
+        framebuffer::draw_text(
+            (win.x + win.w - 46) as usize,
+            (bar_y + 6) as usize,
+            "Go",
+            WHITE,
+            None,
+        );
+        // Status line.
+        framebuffer::draw_text(
+            (win.x + 8) as usize,
+            (cy0 + 42) as usize,
+            &self.browser_status,
+            MUTED,
+            None,
+        );
+        // Page area.
+        let top = cy0 + 64;
+        let bot = win.y + win.h - 8;
+        let visible = self.browser_visible_lines();
+        let max_chars = ((win.w - 44) / CHAR_W).max(1) as usize;
+        let start = self.browser_scroll.min(self.browser_lines.len());
+        let end = (start + visible).min(self.browser_lines.len());
+        for (i, (kind, line)) in self.browser_lines[start..end].iter().enumerate() {
+            let y = top + (i as i32) * CHAR_H;
+            let shown: String = line.chars().take(max_chars).collect();
+            let color = match kind {
+                0 => (140, 180, 255),
+                1 => (255, 200, 100),
+                _ => TEXT,
+            };
+            framebuffer::draw_text(
+                (win.x + 10) as usize,
+                y as usize,
+                &shown,
+                color,
+                None,
+            );
+            if *kind == 0 {
+                framebuffer::fill_rect(
+                    (win.x + 10) as usize,
+                    (y + 17) as usize,
+                    (shown.chars().count() as i32 * CHAR_W) as usize,
+                    2,
+                    (140, 180, 255),
+                );
+            }
+        }
+        if self.browser_lines.is_empty() && self.browser_state != FetchState::Idle {
+            framebuffer::draw_text(
+                (win.x + 10) as usize,
+                top as usize,
+                "Fetching - please wait...",
+                MUTED,
+                None,
+            );
+        }
+        // Scrollbar track + thumb.
+        if bot > top {
+            framebuffer::fill_rect(
+                (win.x + win.w - 18) as usize,
+                top as usize,
+                14,
+                (bot - top) as usize,
+                (50, 54, 72),
+            );
+            let total = self.browser_lines.len();
+            if total > visible {
+                let track = (bot - top) as usize;
+                let thumb_h = (track * visible / total).max(20);
+                let max = self.browser_max_scroll();
+                let thumb_y = top as usize
+                    + if max > 0 {
+                        (track - thumb_h) * self.browser_scroll / max
+                    } else {
+                        0
+                    };
+                framebuffer::fill_rounded_rect(
+                    (win.x + win.w - 16) as usize,
+                    thumb_y,
+                    10,
+                    thumb_h,
+                    5,
+                    (120, 130, 160),
+                );
+            }
+        }
+    }
+
     fn render_settings(&self, win: &Window) {
         let mut y = win.content_y() + 10;
         let tx = (win.x + 12) as usize;
@@ -1365,7 +1838,7 @@ impl Desktop {
         framebuffer::draw_text(
             tx,
             y as usize,
-            "Screen 1280x720  -  heap 100 KiB  -  RockyFS 8 MiB",
+            "Screen 1280x720  -  heap 512 KiB  -  RockyFS 8 MiB",
             TERM_TEXT,
             None,
         );
@@ -1554,6 +2027,7 @@ pub fn run(memory_regions: usize) {
     crate::serial_print(format_args!("desktop: starting\n"));
     x86_64::instructions::interrupts::without_interrupts(|| {
         crate::mouse::init();
+        crate::netserial::init();
     });
     let mut desktop = Desktop::new(memory_regions);
     desktop.render();
@@ -1584,15 +2058,18 @@ pub fn run(memory_regions: usize) {
         if desktop.exit {
             break;
         }
-        // PS/2 keyboard input, batched the same way.
-        let chars = crate::shell::keyboard_chars();
+        // PS/2 keyboard input, batched the same way. Arrow / page
+        // keys scroll the browser; other keys go to the focused app.
+        let keys = crate::shell::keyboard_keys();
         let mut kb_fed = false;
-        for c in chars {
-            if c == '\u{1b}' {
-                desktop.exit = true;
-                break;
+        for k in keys {
+            if let crate::shell::KeyInput::Char(c) = k {
+                if c == '\u{1b}' {
+                    desktop.exit = true;
+                    break;
+                }
             }
-            desktop.feed_char(c);
+            desktop.feed_key(k);
             kb_fed = true;
         }
         if kb_fed {
@@ -1600,6 +2077,10 @@ pub fn run(memory_regions: usize) {
         }
         if desktop.exit {
             break;
+        }
+        // Browser fetch progress over COM2 (polled, non-blocking).
+        if desktop.poll_browser() {
+            desktop.render();
         }
         desktop.handle_mouse();
         let sec = TIMER_TICKS.load(Ordering::SeqCst) / 18;

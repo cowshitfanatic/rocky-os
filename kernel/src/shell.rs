@@ -53,24 +53,62 @@ pub fn serial_read_byte() -> Option<u8> {
 /// Drain the PS/2 scancode queue and return any decoded characters.
 /// Escape is returned as '\u{1b}' (the desktop uses it to exit).
 pub fn keyboard_chars() -> Vec<char> {
-    let mut chars = Vec::new();
+    keyboard_keys()
+        .into_iter()
+        .filter_map(|k| match k {
+            KeyInput::Char(c) => Some(c),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A decoded keyboard input: a printable character, or a
+/// navigation key the desktop browser uses for scrolling.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyInput {
+    Char(char),
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+}
+
+/// Drain the PS/2 scancode queue, keeping arrow / page keys.
+pub fn keyboard_keys() -> Vec<KeyInput> {
+    let mut keys = Vec::new();
     let scancodes = crate::interrupts::scancode_drain();
     if scancodes.is_empty() {
-        return chars;
+        return keys;
     }
     let mut keyboard = KEYBOARD.lock();
     for scancode in scancodes {
         if let Ok(Some(event)) = keyboard.add_byte(scancode) {
             match keyboard.process_keyevent(event) {
-                Some(DecodedKey::Unicode(c)) => chars.push(c),
-                Some(DecodedKey::RawKey(KeyCode::Return)) => chars.push('\n'),
-                Some(DecodedKey::RawKey(KeyCode::Backspace)) => chars.push('\u{8}'),
-                Some(DecodedKey::RawKey(KeyCode::Escape)) => chars.push('\u{1b}'),
+                Some(DecodedKey::Unicode(c)) => keys.push(KeyInput::Char(c)),
+                Some(DecodedKey::RawKey(KeyCode::Return)) => {
+                    keys.push(KeyInput::Char('\n'))
+                }
+                Some(DecodedKey::RawKey(KeyCode::Backspace)) => {
+                    keys.push(KeyInput::Char('\u{8}'))
+                }
+                Some(DecodedKey::RawKey(KeyCode::Escape)) => {
+                    keys.push(KeyInput::Char('\u{1b}'))
+                }
+                Some(DecodedKey::RawKey(KeyCode::ArrowUp)) => keys.push(KeyInput::Up),
+                Some(DecodedKey::RawKey(KeyCode::ArrowDown)) => {
+                    keys.push(KeyInput::Down)
+                }
+                Some(DecodedKey::RawKey(KeyCode::PageUp)) => {
+                    keys.push(KeyInput::PageUp)
+                }
+                Some(DecodedKey::RawKey(KeyCode::PageDown)) => {
+                    keys.push(KeyInput::PageDown)
+                }
                 _ => {}
             }
         }
     }
-    chars
+    keys
 }
 
 /// Read one line, echoing as we go. Returns the line without the newline.
@@ -244,7 +282,7 @@ pub fn run_command(line: &str, memory_regions: usize, sink: &mut dyn FnMut(&str)
         }
         Some("mem") => {
             o.outln(&alloc::format!(
-                "{} memory regions reported, heap is 100 KiB",
+                "{} memory regions reported, heap is 512 KiB",
                 memory_regions
             ));
         }

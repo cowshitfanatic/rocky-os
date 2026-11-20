@@ -31,6 +31,10 @@ fn main() {
     // is scriptable (`printf 'help\nexit\n' | cargo run`). The monitor
     // socket is for `sendkey` (PS/2 keyboard) and `screendump` tests.
     cmd.arg("-serial").arg("stdio");
+    // COM2: second serial port for the browser's net proxy
+    // (scripts/net-proxy.py). `server,nowait` so booting never
+    // blocks when no proxy is connected.
+    cmd.arg("-serial").arg("unix:/tmp/rocky-net,server,nowait");
     cmd.arg("-display").arg("none");
     cmd.arg("-monitor")
         .arg("unix:/tmp/rocky-mon,server,nowait");

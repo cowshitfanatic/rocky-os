@@ -7,11 +7,17 @@
 //! 5-page double-fault stack, preceded by an unmapped guard page:
 //!
 //! ```text
-//! 0x4444_4445_9000  guard page (unmapped — a stack overflow faults
+//! 0x4444_444C_0000  guard page (unmapped — a stack overflow faults
 //!                    here instead of silently corrupting the heap)
-//! 0x4444_4445_A000  double-fault stack, 5 pages (20 KiB)
-//! 0x4444_4445_F000  stack top (stacks grow down)
+//! 0x4444_444C_1000  double-fault stack, 5 pages (20 KiB)
+//! 0x4444_444C_6000  stack top (stacks grow down)
 //! ```
+//!
+//! The heap is 512 KiB at 0x4444_4444_0000, so it ends at
+//! 0x4444_444C_0000; these stack addresses sit just above it.
+//! (They were 0x4444_4445_xxxx when the heap was 100 KiB —
+//! raising the heap without moving them made the heap overlap
+//! the stack and GDT init failed with PageAlreadyMapped.)
 //!
 //! The IDT double-fault entry is wired to IST index 0 (see
 //! `interrupts.rs`), so the CPU switches to this stack automatically
@@ -32,7 +38,7 @@ use x86_64::structures::tss::TaskStateSegment;
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 /// Virtual address of the (unmapped) guard page below the stack.
-pub const DOUBLE_FAULT_STACK_GUARD: u64 = 0x_4444_4445_9000;
+pub const DOUBLE_FAULT_STACK_GUARD: u64 = 0x_4444_444C_0000;
 /// Virtual address of the bottom of the double-fault stack.
 pub const DOUBLE_FAULT_STACK_BASE: u64 = DOUBLE_FAULT_STACK_GUARD + 0x1000;
 /// Number of 4 KiB pages in the double-fault stack.
@@ -46,7 +52,7 @@ static STACK_TOP: AtomicU64 = AtomicU64::new(0);
 /// Virtual address of the kernel stack for ring-3 traps: the CPU
 /// switches to this stack via `TSS.privilege_stack_table[0]` when
 /// a ring-3 program traps into the kernel.
-pub const USER_KERNEL_STACK_BASE: u64 = 0x_4444_4447_0000;
+pub const USER_KERNEL_STACK_BASE: u64 = 0x_4444_444D_0000;
 pub const USER_KERNEL_STACK_PAGES: u64 = 4;
 pub const USER_KERNEL_STACK_TOP: u64 =
     USER_KERNEL_STACK_BASE + USER_KERNEL_STACK_PAGES * 0x1000;

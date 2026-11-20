@@ -4,7 +4,7 @@
 //! `BootInfo.physical_memory_offset` (enabled via our custom
 //! `BOOTLOADER_CONFIG`). From that we build an `OffsetPageTable` over the
 //! bootloader's level-4 table, hand out 4 KiB frames from the usable
-//! regions of the memory map, and map a 100 KiB heap for `alloc`.
+//! regions of the memory map, and map a 512 KiB heap for `alloc`.
 
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 use linked_list_allocator::LockedHeap;
@@ -16,7 +16,7 @@ use x86_64::structures::paging::{
 };
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 100 * 1024;
+pub const HEAP_SIZE: usize = 512 * 1024;
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();

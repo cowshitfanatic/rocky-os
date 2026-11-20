@@ -17,7 +17,7 @@ and Rocky.
   offset in `BootInfo` (enabled with a custom `BOOTLOADER_CONFIG`),
   an `OffsetPageTable` is built over the bootloader's level-4 table,
   a frame allocator hands out 4 KiB frames from the usable memory
-  regions, and a 100 KiB heap is mapped and registered as the global
+  regions, and a 512 KiB heap is mapped and registered as the global
   allocator (`linked_list_allocator`). The kernel proves it by
   allocating a `Vec` of squares and a `String` at boot.
 - **Interrupts** — IDT with handlers for breakpoint, divide-by-zero,
@@ -85,21 +85,48 @@ and Rocky.
   (indigo → violet → teal) with three glowing orbs and
   deterministic stars, a dark glass top bar (Rocky logo, focused
   app, search pill, live uptime clock, memory count, Exit), a
-  floating bottom dock with six apps and active dots, a Start
+  floating bottom dock with seven apps and active dots, a Start
   menu, desktop icons on the left, and a live clock widget
   (large time, theme name, uptime, memory regions). Windows have
   drop shadows, rounded corners, gradient title bars and
   traffic-light buttons (red close, amber minimise to the dock,
   green maximise/restore), drag by the title bar, and focus brings
-  them to the front. Six apps ship in windows: a Terminal (runs
+  them to the front. Seven apps ship in windows: a Terminal (runs
   the shell commands, output captured into a scrollback), a Files
   browser (lists RockyFS files, click one to view its contents),
   a Calculator (clickable buttons, `+ - * /` and parentheses,
   e.g. `7+8=` shows `15`), Notes (editable, Save writes
   `notes.txt` to RockyFS and reloads it on open), System Monitor
   (live uptime/ticks, memory, preemptions, scheduler task list,
-  animated activity bar), and Settings (version/specs plus three
-  wallpaper themes — Aurora, Sunset, Midnight — applied on click).
+  animated activity bar), Settings (version/specs plus three
+  wallpaper themes — Aurora, Sunset, Midnight — applied on click),
+  and a Web Browser (below).
+- **Web Browser** — a scratch-built text browser (7th desktop
+  app), honest about its transport: Rocky OS has **no Ethernet
+  driver, no TCP/IP, no DNS, and no TLS in-kernel**, so it fetches
+  like early dial-up over a second serial port. The kernel's
+  COM2 driver (`kernel/src/netserial.rs`, UART 16550 at 0x2F8,
+  115200 baud, polled) sends `GET <url>`; the host-side proxy
+  (`scripts/net-proxy.py`, stdlib only) fetches the real page
+  over HTTPS, extracts the article text with `html.parser`
+  (title, headings, paragraphs, list items; script/style/nav
+  dropped, capped at 16,000 chars), and streams it back as
+  `OK <len>` + bytes + `END`. QEMU wires COM2 with
+  `-serial unix:/tmp/rocky-net,server,nowait`, so booting never
+  blocks when no proxy is running. The browser itself is
+  scratch-built Rust in `desktop.rs`: URL bar (type a URL, Enter
+  or Go fetches it), status line, word-wrapped page rendering
+  (title in blue + underline, headings in amber), a clickable
+  scrollbar, and Up/Down/PgUp/PgDn scrolling; the fetch is polled
+  a little per desktop loop iteration so the UI stays responsive
+  while ~16 KiB streams in at 115200 baud. It auto-loads
+  `https://en.wikipedia.org/wiki/Chimpanzee` on first open, and
+  the live fetch is proven by `scripts/test-browser.py` and
+  `screenshot-browser.png`. Text only — no images, CSS, or JS —
+  and the bitmap font has no IPA glyphs, so a few pronunciation
+  characters render blank. Run the proxy first, then the OS:
+  `python3 scripts/net-proxy.py` (in another terminal) +
+  `cargo run`, then `desktop` and click the W dock icon.
   Rendering is a full redraw on each event; a per-pixel fill loop
   turned out to cost ~1.5 s per frame in a debug build, so filled
   rectangles are drawn with a row `memcpy` instead, and input is
@@ -142,6 +169,7 @@ python3 scripts/test-preemption.py
 python3 scripts/test-fs.py
 python3 scripts/test-usermode.py
 python3 scripts/test-desktop.py
+python3 scripts/test-browser.py
 ```
 
 `test-desktop.py` boots, enters the desktop, takes QEMU monitor
@@ -203,7 +231,8 @@ socat - UNIX-CONNECT:/tmp/rocky-mon
 - `kernel/src/mouse.rs` — PS/2 mouse driver (lock-free state)
 - `kernel/src/desktop.rs` — window manager, compositor, wallpaper
   + themes, dock, Start menu, Terminal / Files / Calculator /
-  Notes / System Monitor / Settings apps
+  Notes / System Monitor / Settings / Web Browser apps
+- `kernel/src/netserial.rs` — COM2 UART driver (browser link)
 - `build.rs` — turns the compiled kernel into a bootable BIOS
   disk image (`bios.img`)
 - `src/main.rs` — the host-side runner that launches QEMU
@@ -215,6 +244,13 @@ socat - UNIX-CONNECT:/tmp/rocky-mon
 - `scripts/test-fs.py` — filesystem persistence across reboots
 - `scripts/test-usermode.py` — ring-3 good/bad program test
 - `scripts/test-desktop.py` — fancy desktop screendump + mouse test
+- `scripts/test-browser.py` — browser test: starts the net proxy,
+  opens the Browser from the dock, checks the live Chimpanzee
+  fetch marker + screendump, saves `screenshot-browser.png`
+- `scripts/net-proxy.py` — host-side HTTPS proxy for the browser
+  (COM2 serial bridge; see Web Browser above)
+- `screenshot-browser.png` — QEMU screendump of the Wikipedia
+  Chimpanzee page open in the scratch-built browser
 - `screenshot.png` — QEMU screendump of the fancy desktop
   (`screenshot-fancy-1.png` .. `screenshot-fancy-4.png` show the
   default desktop, the Start menu, Monitor + Notes, and the
@@ -239,7 +275,16 @@ socat - UNIX-CONNECT:/tmp/rocky-mon
 4. **Keyboard via serial is polling** — the UART IRQ (IRQ 4) is not
    wired up; the shell polls COM1 and wakes on timer ticks.
 5. **No networking, no sound, no USB** — and no real hardware
-   testing; everything is verified in QEMU only.
+   testing; everything is verified in QEMU only. The one
+   exception is the browser, which fetches over a COM2 serial
+   link to a host-side proxy — there is still no Ethernet driver,
+   TCP/IP, DNS, or TLS inside the kernel.
+7. **Browser is text-only over serial** — no images, CSS, or
+   JavaScript; pages are capped at 16,000 chars of extracted
+   text, and fetching needs `scripts/net-proxy.py` running on
+   the host (without it the browser times out after ~10 s with
+   a clear error). The bitmap font has no IPA glyphs, so a few
+   pronunciation characters render blank.
 6. **Desktop is a full redraw, and there is no real clock** — every
    mouse move, keypress, or clock second repaints the whole
    1280×720 screen (~120 ms in a debug build; no dirty-rect
